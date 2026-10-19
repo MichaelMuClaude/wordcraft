@@ -17,6 +17,10 @@ pub fn specs() -> Vec<CommandSpec> {
         CommandSpec::new("text.columnBreak", "Column Break", "Layout › Breaks", |s, _| ins_char(s, COLUMN_BREAK)).key("Mod+Shift+Enter"),
         CommandSpec::new("text.tab", "Tab", "Editing", tab).key("Tab"),
         CommandSpec::new("text.backTab", "Shift+Tab", "Editing", back_tab).key("Shift+Tab"),
+        // Plain Tab moves between table cells; Ctrl+Tab always inserts a tab character, as in
+        // Word, so a cell can hold one (#3137). The literal "Ctrl" (not Mod/Cmd) matches Word on
+        // every platform: Cmd+Tab is the OS app switcher on macOS.
+        CommandSpec::new("text.insertTab", "Insert Tab Character", "Editing", |s, _| ins_char(s, '\t')).key("Ctrl+Tab"),
         CommandSpec::new("text.backspace", "Backspace", "Editing", backspace).key("Backspace"),
         CommandSpec::new("text.delete", "Delete", "Editing", delete).key("Delete"),
         CommandSpec::new("text.deleteWordBack", "Delete Previous Word", "Editing", delete_word_back).key("Mod+Backspace / Alt+Backspace"),
