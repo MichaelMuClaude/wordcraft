@@ -296,17 +296,17 @@ enum Ev {
     Text(String),
 }
 
-/// Stream XML events (empty elements become start + end). `Err` for a parser error, or for end
-/// of input with an element still open — quick-xml returns an ordinary `Event::Eof` for both a
+/// Stream XML events (empty elements become start + end). `Err` for a parser error (including a
+/// closing tag that doesn't match what it closes, or one with no open element to close — unlike
+/// `odt.rs`'s lenient reader, `container.xml` and the package document are required by spec to
+/// be well-formed, and the depth check below depends on End events being genuine), or for end of
+/// input with an element still open — quick-xml returns an ordinary `Event::Eof` for both a
 /// well-formed document and one truncated mid-element, so a caller that only looked at the
-/// events it got could mistake a cut-off `container.xml` or package document for a complete,
-/// if sparse, one and import a silently partial document.
+/// events it got could mistake a cut-off `container.xml` or package document for a complete, if
+/// sparse, one and import a silently partial document.
 fn events(xml: &[u8], mut f: impl FnMut(Ev)) -> Result<(), ()> {
     let mut r = quick_xml::Reader::from_reader(xml);
-    let cfg = r.config_mut();
-    cfg.trim_text(false);
-    cfg.check_end_names = false;
-    cfg.allow_unmatched_ends = true;
+    r.config_mut().trim_text(false);
     let mut buf = Vec::new();
     let mut depth: usize = 0;
     loop {
@@ -322,7 +322,10 @@ fn events(xml: &[u8], mut f: impl FnMut(Ev)) -> Result<(), ()> {
                 f(Ev::End(n));
             }
             Ok(Event::End(e)) => {
-                depth = depth.saturating_sub(1);
+                depth = match depth.checked_sub(1) {
+                    Some(d) => d,
+                    None => return Err(()),
+                };
                 f(Ev::End(String::from_utf8_lossy(e.name().as_ref()).into_owned()));
             }
             Ok(Event::Text(t)) => f(Ev::Text(t.decode().map(|c| c.into_owned()).unwrap_or_default())),
@@ -485,6 +488,20 @@ mod tests {
 <manifest><item id="c1" href="chapter1.xhtml" media-type="application/xhtml+xml"/></manifest>
 <spine><itemref idref="c1"/>"#;
         let bytes = zip_of(&[("META-INF/container.xml", CONTAINER), ("OEBPS/content.opf", &truncated[..])]);
+        assert!(import(&bytes).is_err());
+    }
+
+    /// A closing tag that doesn't match its open element must not decrement the depth counter
+    /// as if it did — otherwise a `</wrong>` closing an unrelated element could reach EOF at
+    /// depth zero despite `<container>` never actually closing, defeating the truncation check
+    /// above.
+    #[test]
+    fn mismatched_closing_tag_is_an_error() {
+        let mismatched = br#"<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+<rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles>
+</wrong>"#;
+        let bytes = zip_of(&[("META-INF/container.xml", &mismatched[..]), ("OEBPS/content.opf", &opf(""))]);
         assert!(import(&bytes).is_err());
     }
 

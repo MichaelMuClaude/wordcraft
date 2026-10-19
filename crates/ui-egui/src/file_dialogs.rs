@@ -547,6 +547,52 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// #3117: the backstage Save button and the Mod+S shortcut both ask for a supported target
+    /// too, not just the commands the tests above call directly — mirrors
+    /// `imported_word_save_controls_ask_for_docx` for legacy Word files.
+    #[test]
+    fn imported_epub_save_controls_ask_for_docx() {
+        use egui_kittest::kittest::Queryable;
+        let dir = scratch("imported-epub-entry-points");
+        let original = dir.join("novella.epub");
+        let bytes = minimal_epub_bytes("Once upon a time.");
+        std::fs::write(&original, &bytes).unwrap();
+        let (mut a, shown) = async_app();
+        a.run("ui.language", json!({"value": "en"})).unwrap();
+        a.run("file.open", json!({"path": original.to_string_lossy()})).unwrap();
+        typed(&mut a);
+        a.run("ui.backstage", json!({"value": true, "page": "home"})).unwrap();
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1440.0, 900.0)).build_ui_state(
+            |ui, app: &mut WordApp| {
+                let ctx = ui.ctx().clone();
+                app.logic(&ctx);
+                app.ui(ui);
+            },
+            a,
+        );
+        h.run_steps(4);
+        h.get_by_label("Save").click();
+        h.run_steps(3);
+        assert!(h.state().file_dialog_open(), "the Save button asks for a supported target");
+        assert_eq!(shown.borrow()[0].0, FileDialogRequest::Save { name: "novella.docx".into() });
+        answer(&shown, None);
+        h.run_steps(3);
+
+        h.state_mut().run("ui.backstage", json!({"value": false})).unwrap();
+        h.state_mut().canvas.want_focus = true;
+        h.run_steps(6);
+        assert!(h.state().canvas.focused, "Mod+S starts in the editor");
+        h.event(egui::Event::Key { key: egui::Key::S, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::COMMAND });
+        h.run_steps(3);
+        assert!(h.state().file_dialog_open(), "the focused editor's Mod+S asks too");
+        assert_eq!(shown.borrow()[0].0, FileDialogRequest::Save { name: "novella.docx".into() });
+        answer(&shown, None);
+        h.run_steps(3);
+        assert!(h.state().session.dirty);
+        assert_eq!(h.state().session.path.as_deref(), Some(original.as_path()));
+        assert_eq!(std::fs::read(&original).unwrap(), bytes);
+    }
+
     /// #2445: Save on an imported binary Word file asks for DOCX, preserving the import on Cancel.
     #[test]
     fn imported_word_save_asks_for_docx_and_preserves_the_original() {
