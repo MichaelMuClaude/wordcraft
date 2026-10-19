@@ -10,7 +10,7 @@
 //!
 //! This is a first pass: fixed-layout EPUBs, scripted content, DRM and EPUB 2 packages whose
 //! spine points at non-XHTML content are not specifically handled (the HTML importer reads what
-//! text it can from maformed markup; it does not reject it).
+//! text it can from malformed markup; it does not reject it).
 //!
 //! Written from the public EPUB 3.3, OCF and XHTML specifications; no code from another EPUB
 //! reader or converter is used.
@@ -115,12 +115,20 @@ fn read_package(xml: &[u8], opf_dir: &str) -> Package {
     let mut pkg = Package::default();
     let mut in_metadata = false;
     let mut cur_meta: Option<&'static str> = None;
+    // The *first* `dc:title`/`dc:creator`/`dc:language` wins when a package repeats one (OPF
+    // allows several, e.g. alternate-script titles); these latch once that element ends, so a
+    // later element of the same name no longer opens `cur_meta`. Within one element, every text
+    // and entity-reference event appends (quick-xml splits text around `&amp;` etc. into several
+    // events), instead of keeping only the first chunk.
+    let mut title_done = false;
+    let mut creator_done = false;
+    let mut language_done = false;
     events(xml, |ev| match ev {
         Ev::Start(q, a) => match local(&q) {
             "metadata" => in_metadata = true,
-            "title" if in_metadata => cur_meta = Some("title"),
-            "creator" if in_metadata => cur_meta = Some("creator"),
-            "language" if in_metadata => cur_meta = Some("language"),
+            "title" if in_metadata && !title_done => cur_meta = Some("title"),
+            "creator" if in_metadata && !creator_done => cur_meta = Some("creator"),
+            "language" if in_metadata && !language_done => cur_meta = Some("language"),
             "item" if manifest.len() < MAX_MANIFEST => {
                 if let (Some(id), Some(href)) = (get(&a, "id"), get(&a, "href")) {
                     manifest.insert(id.to_string(), resolve_path(opf_dir, href));
@@ -135,16 +143,28 @@ fn read_package(xml: &[u8], opf_dir: &str) -> Package {
         },
         Ev::End(q) => match local(&q) {
             "metadata" => in_metadata = false,
-            "title" | "creator" | "language" => cur_meta = None,
+            "title" if cur_meta == Some("title") => {
+                title_done = true;
+                cur_meta = None;
+            }
+            "creator" if cur_meta == Some("creator") => {
+                creator_done = true;
+                cur_meta = None;
+            }
+            "language" if cur_meta == Some("language") => {
+                language_done = true;
+                cur_meta = None;
+            }
             _ => {}
         },
         Ev::Text(t) => match cur_meta {
-            Some("title") if pkg.title.is_empty() => pkg.title.push_str(&t),
-            Some("creator") if pkg.creator.is_empty() => pkg.creator.push_str(&t),
-            Some("language") if pkg.language.is_none() => pkg.language = Some(t).filter(|s| !s.trim().is_empty()),
+            Some("title") => pkg.title.push_str(&t),
+            Some("creator") => pkg.creator.push_str(&t),
+            Some("language") => pkg.language.get_or_insert_with(String::new).push_str(&t),
             _ => {}
         },
     });
+    pkg.language = pkg.language.filter(|s| !s.trim().is_empty());
     pkg.spine = idrefs.into_iter().filter_map(|id| manifest.get(&id).cloned()).collect();
     pkg
 }
@@ -292,6 +312,18 @@ fn events(xml: &[u8], mut f: impl FnMut(Ev)) {
             Ok(Event::End(e)) => f(Ev::End(String::from_utf8_lossy(e.name().as_ref()).into_owned())),
             Ok(Event::Text(t)) => f(Ev::Text(t.decode().map(|c| c.into_owned()).unwrap_or_default())),
             Ok(Event::CData(t)) => f(Ev::Text(String::from_utf8_lossy(&t).into_owned())),
+            Ok(Event::GeneralRef(r)) => {
+                let name = String::from_utf8_lossy(&r).into_owned();
+                let s = match name.as_str() {
+                    "amp" => "&".to_string(),
+                    "lt" => "<".to_string(),
+                    "gt" => ">".to_string(),
+                    "quot" => "\"".to_string(),
+                    "apos" => "'".to_string(),
+                    _ => r.resolve_char_ref().ok().flatten().map(|c| c.to_string()).unwrap_or_default(),
+                };
+                f(Ev::Text(s));
+            }
             Ok(Event::Eof) | Err(_) => break,
             Ok(_) => {}
         }
@@ -366,6 +398,26 @@ mod tests {
         assert_eq!(pkg.creator, "Jane Author");
         assert_eq!(pkg.language.as_deref(), Some("en"));
         assert_eq!(pkg.spine, vec!["OEBPS/text/chapter1.xhtml", "OEBPS/text/chapter2.xhtml"]);
+    }
+
+    /// quick-xml splits text around an entity reference into several `Text`/`GeneralRef` events;
+    /// title/creator must accumulate all of them, not just the first chunk, and a repeated
+    /// element (OPF allows more than one `dc:title`) must not overwrite what the first gave.
+    #[test]
+    fn metadata_accumulates_across_entity_references_and_keeps_only_the_first_element() {
+        let xml = br#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id">
+<metadata>
+<dc:title xmlns:dc="http://purl.org/dc/elements/1.1/">Fish &amp; Chips</dc:title>
+<dc:title xmlns:dc="http://purl.org/dc/elements/1.1/">A second, ignored title</dc:title>
+<dc:creator xmlns:dc="http://purl.org/dc/elements/1.1/">Smith &amp; Sons</dc:creator>
+</metadata>
+<manifest/>
+<spine/>
+</package>"#;
+        let pkg = read_package(xml, "OEBPS");
+        assert_eq!(pkg.title, "Fish & Chips");
+        assert_eq!(pkg.creator, "Smith & Sons");
     }
 
     #[test]
