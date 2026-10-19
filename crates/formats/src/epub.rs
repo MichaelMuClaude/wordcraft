@@ -57,10 +57,12 @@ pub fn import(bytes: &[u8]) -> Result<Document, String> {
 fn parse_lang(bytes: &[u8]) -> Result<(Flow, Option<String>), String> {
     let mut z = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|e| format!("EPUB: not a valid package ({e})"))?;
     let container = read_entry(&mut z, "META-INF/container.xml", MAX_TOTAL).ok_or("EPUB: META-INF/container.xml is missing")?;
-    let opf_path = container_rootfile(&container).ok_or("EPUB: container.xml names no package document")?;
+    let opf_path = container_rootfile(&container)
+        .map_err(|()| "EPUB: META-INF/container.xml is truncated or malformed")?
+        .ok_or("EPUB: container.xml names no package document")?;
     let opf_bytes = read_entry(&mut z, &opf_path, MAX_TOTAL).ok_or_else(|| format!("EPUB: package document {opf_path} is missing"))?;
     let opf_dir = dir_of(&opf_path);
-    let pkg = read_package(&opf_bytes, &opf_dir);
+    let pkg = read_package(&opf_bytes, &opf_dir).map_err(|()| format!("EPUB: package document {opf_path} is truncated or malformed"))?;
 
     let mut budget = MAX_TOTAL.saturating_sub(container.len() as u64).saturating_sub(opf_bytes.len() as u64);
     let mut blocks: Vec<FBlock> = Vec::new();
@@ -93,7 +95,9 @@ struct Package {
 }
 
 /// `META-INF/container.xml`'s package document path (the first `rootfile`'s `full-path`).
-fn container_rootfile(xml: &[u8]) -> Option<String> {
+/// `Err`: the XML is truncated or malformed. `Ok(None)`: well-formed, but names no package
+/// document.
+fn container_rootfile(xml: &[u8]) -> Result<Option<String>, ()> {
     let mut path = None;
     events(xml, |ev| {
         if path.is_none()
@@ -102,13 +106,13 @@ fn container_rootfile(xml: &[u8]) -> Option<String> {
         {
             path = get(&a, "full-path").map(str::to_string);
         }
-    });
-    path.filter(|s| !s.is_empty())
+    })?;
+    Ok(path.filter(|s| !s.is_empty()))
 }
 
 /// The package document (OPF): manifest (id → href) and spine (idrefs, in order) resolved to
 /// full in-zip paths under `opf_dir`, plus `dc:title`/`dc:creator`/`dc:language`.
-fn read_package(xml: &[u8], opf_dir: &str) -> Package {
+fn read_package(xml: &[u8], opf_dir: &str) -> Result<Package, ()> {
     use std::collections::HashMap;
     let mut manifest: HashMap<String, String> = HashMap::new();
     let mut idrefs: Vec<String> = Vec::new();
@@ -163,10 +167,10 @@ fn read_package(xml: &[u8], opf_dir: &str) -> Package {
             Some("language") => pkg.language.get_or_insert_with(String::new).push_str(&t),
             _ => {}
         },
-    });
+    })?;
     pkg.language = pkg.language.filter(|s| !s.trim().is_empty());
     pkg.spine = idrefs.into_iter().filter_map(|id| manifest.get(&id).cloned()).collect();
-    pkg
+    Ok(pkg)
 }
 
 /// The directory portion of an in-package path (`a/b/c.xhtml` → `a/b`; `c.xhtml` → `""`).
@@ -292,24 +296,35 @@ enum Ev {
     Text(String),
 }
 
-/// Stream XML events (empty elements become start + end). Malformed XML ends the stream.
-fn events(xml: &[u8], mut f: impl FnMut(Ev)) {
+/// Stream XML events (empty elements become start + end). `Err` for a parser error, or for end
+/// of input with an element still open — quick-xml returns an ordinary `Event::Eof` for both a
+/// well-formed document and one truncated mid-element, so a caller that only looked at the
+/// events it got could mistake a cut-off `container.xml` or package document for a complete,
+/// if sparse, one and import a silently partial document.
+fn events(xml: &[u8], mut f: impl FnMut(Ev)) -> Result<(), ()> {
     let mut r = quick_xml::Reader::from_reader(xml);
     let cfg = r.config_mut();
     cfg.trim_text(false);
     cfg.check_end_names = false;
     cfg.allow_unmatched_ends = true;
     let mut buf = Vec::new();
+    let mut depth: usize = 0;
     loop {
         buf.clear();
         match r.read_event_into(&mut buf) {
-            Ok(Event::Start(e)) => f(Ev::Start(String::from_utf8_lossy(e.name().as_ref()).into_owned(), attrs_of(&e))),
+            Ok(Event::Start(e)) => {
+                depth += 1;
+                f(Ev::Start(String::from_utf8_lossy(e.name().as_ref()).into_owned(), attrs_of(&e)));
+            }
             Ok(Event::Empty(e)) => {
                 let n = String::from_utf8_lossy(e.name().as_ref()).into_owned();
                 f(Ev::Start(n.clone(), attrs_of(&e)));
                 f(Ev::End(n));
             }
-            Ok(Event::End(e)) => f(Ev::End(String::from_utf8_lossy(e.name().as_ref()).into_owned())),
+            Ok(Event::End(e)) => {
+                depth = depth.saturating_sub(1);
+                f(Ev::End(String::from_utf8_lossy(e.name().as_ref()).into_owned()));
+            }
             Ok(Event::Text(t)) => f(Ev::Text(t.decode().map(|c| c.into_owned()).unwrap_or_default())),
             Ok(Event::CData(t)) => f(Ev::Text(String::from_utf8_lossy(&t).into_owned())),
             Ok(Event::GeneralRef(r)) => {
@@ -324,7 +339,8 @@ fn events(xml: &[u8], mut f: impl FnMut(Ev)) {
                 };
                 f(Ev::Text(s));
             }
-            Ok(Event::Eof) | Err(_) => break,
+            Ok(Event::Eof) => return if depth == 0 { Ok(()) } else { Err(()) },
+            Err(_) => return Err(()),
             Ok(_) => {}
         }
     }
@@ -393,7 +409,7 @@ mod tests {
 
     #[test]
     fn reads_container_and_package() {
-        let pkg = read_package(&opf(r#"<itemref idref="c1"/><itemref idref="c2"/>"#), "OEBPS");
+        let pkg = read_package(&opf(r#"<itemref idref="c1"/><itemref idref="c2"/>"#), "OEBPS").unwrap();
         assert_eq!(pkg.title, "Test Book");
         assert_eq!(pkg.creator, "Jane Author");
         assert_eq!(pkg.language.as_deref(), Some("en"));
@@ -415,7 +431,7 @@ mod tests {
 <manifest/>
 <spine/>
 </package>"#;
-        let pkg = read_package(xml, "OEBPS");
+        let pkg = read_package(xml, "OEBPS").unwrap();
         assert_eq!(pkg.title, "Fish & Chips");
         assert_eq!(pkg.creator, "Smith & Sons");
     }
@@ -444,6 +460,32 @@ mod tests {
     #[test]
     fn not_a_zip_is_an_error() {
         assert!(import(b"not a zip file").is_err());
+    }
+
+    /// Truncated mid-element, after the rootfile it names: a lenient parser that only reports
+    /// the events it already produced could otherwise call this a well-formed container with no
+    /// rootfile missing, and import whatever of the package it still found — a silently partial
+    /// document instead of a refused, visibly corrupt one.
+    #[test]
+    fn container_truncated_after_its_useful_content_is_still_an_error() {
+        let truncated = br#"<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+<rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>"#;
+        let bytes = zip_of(&[("META-INF/container.xml", &truncated[..]), ("OEBPS/content.opf", &opf(""))]);
+        assert!(import(&bytes).is_err());
+    }
+
+    /// Same, for the package document: truncated after its manifest but before its spine, which
+    /// would otherwise import a document with no chapters and no error.
+    #[test]
+    fn package_document_truncated_mid_spine_is_still_an_error() {
+        let truncated = br#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id">
+<metadata><dc:title xmlns:dc="http://purl.org/dc/elements/1.1/">Test Book</dc:title></metadata>
+<manifest><item id="c1" href="chapter1.xhtml" media-type="application/xhtml+xml"/></manifest>
+<spine><itemref idref="c1"/>"#;
+        let bytes = zip_of(&[("META-INF/container.xml", CONTAINER), ("OEBPS/content.opf", &truncated[..])]);
+        assert!(import(&bytes).is_err());
     }
 
     #[test]

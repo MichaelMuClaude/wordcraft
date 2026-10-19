@@ -510,6 +510,43 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// #3117: the Save Changes prompt's own `SaveChoice::Save` (`ui.saveChanges {"answer":
+    /// "save"}`) is a separate code path from `execute_user`'s direct `file.save`, covered above
+    /// — this exercises it through File › Close instead, as
+    /// `imported_word_close_waits_for_save_as_and_keeps_failed_or_cancelled_drafts` does for
+    /// legacy Word files.
+    #[test]
+    fn imported_epub_close_prompt_save_asks_for_docx_and_preserves_the_original() {
+        let dir = scratch("imported-epub-close");
+        let original = dir.join("novella.epub");
+        let bytes = minimal_epub_bytes("Once upon a time.");
+        std::fs::write(&original, &bytes).unwrap();
+        let (mut a, shown) = async_app();
+        a.run("file.open", json!({"path": original.to_string_lossy()})).unwrap();
+        a.run("text.insert", json!({"text": "Revised "})).unwrap();
+        let draft = a.session.doc.clone();
+
+        a.run("file.close", json!({})).unwrap();
+        assert_eq!(a.run("ui.saveChanges", json!({"answer": "save"})).unwrap()["pending"], "saveAs");
+        assert!(a.has_document() && !a.quit_requested);
+        answer(&shown, None);
+        assert_eq!(a.poll_file_dialog().unwrap().unwrap()["done"], false);
+        assert!(a.has_document() && a.session.dirty && !a.quit_requested);
+        assert_eq!(a.session.path.as_deref(), Some(original.as_path()));
+        assert_eq!(std::fs::read(&original).unwrap(), bytes);
+        assert_eq!(a.session.doc, draft);
+
+        a.run("file.close", json!({})).unwrap();
+        a.run("ui.saveChanges", json!({"answer": "save"})).unwrap();
+        let saved = dir.join("novella.docx");
+        answer(&shown, Some(&saved.to_string_lossy()));
+        assert_eq!(a.poll_file_dialog().unwrap().unwrap()["done"], true);
+        assert!(!a.has_document() && !a.quit_requested, "Close runs only after the DOCX save succeeds");
+        assert!(saved_text(&saved).contains("Revised Once upon a time."));
+        assert_eq!(std::fs::read(&original).unwrap(), bytes);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     /// #2445: Save on an imported binary Word file asks for DOCX, preserving the import on Cancel.
     #[test]
     fn imported_word_save_asks_for_docx_and_preserves_the_original() {
