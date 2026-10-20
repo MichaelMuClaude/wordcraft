@@ -787,7 +787,21 @@ pub(crate) fn generated_list(s: &mut Session, instr: &str, title: &str) -> Resul
     )?;
     let i = if s.doc.para_at(&at).is_some_and(|p| p.is_empty()) { at.path.last() } else { s.doc.split_paragraph(&at)?.path.last() };
     s.doc.insert_block(StoryRef::Body, &Path::top(i), Block::Para(head))?;
-    update_generated(s)
+    update_generated(s)?;
+    // Like Word, the caret lands in a paragraph right after the list, ready to keep typing — not
+    // inside its own title or entries, where typing (or Enter) would corrupt them (the same fix
+    // as references.toc's insert_toc, for its sibling generated lists: bibliography, table of
+    // figures, table of authorities and, through insert_index's first-creation path, the index).
+    let mut after = i + 1;
+    while s.doc.body.get(after).and_then(|b| b.as_para()).is_some_and(|p| p.props.style.as_deref() == Some(ENTRY_STYLE)) {
+        after += 1;
+    }
+    let is_para = s.doc.body.get(after).is_some_and(|b| b.as_para().is_some());
+    if !is_para {
+        s.doc.insert_block(StoryRef::Body, &Path::top(after), Block::Para(Paragraph::new()))?;
+    }
+    s.sel = Selection::caret(Pos { story: StoryRef::Body, path: Path::top(after), off: 0 });
+    Ok(())
 }
 
 fn list_kind(p: &Paragraph) -> Option<String> {
@@ -1259,6 +1273,42 @@ mod tests {
         let (name, _) = s.doc.bookmarks().into_iter().find(|(n, _)| n.starts_with("_Ref")).unwrap();
         assert_eq!(crate::cmd::references::bookmark_text(&s.doc, &name).as_deref(), Some("Figure 1"));
         assert!(fields(&s).contains(&(format!("REF {name} \\h"), "Figure 1".to_string())), "{:?}", fields(&s));
+    }
+
+    /// Inserting a generated list (bibliography, table of figures, table of authorities, index)
+    /// must leave the caret in a paragraph right after it, like `references.toc` does for the
+    /// table of contents — not inside the list's own title or entries, where typing next (the
+    /// ordinary next step after inserting one) would corrupt them.
+    #[test]
+    fn a_generated_list_leaves_the_caret_after_it_not_inside_it() {
+        let after = |s: &Session| {
+            s.doc.para_at(&s.sel.focus).is_some_and(|p| p.props.style.as_deref() != Some("Heading1") && p.props.style.as_deref() != Some(ENTRY_STYLE))
+        };
+
+        let mut s = Session::new(wordcraft_doc::Document::new());
+        s.run("references.bibliography", &json!({})).unwrap();
+        assert!(after(&s), "bibliography: {:?}", s.sel.focus);
+        s.run("text.insert", &json!({"text": "Body text."})).unwrap();
+        assert_eq!(s.doc.plain_text(StoryRef::Body).matches("References").count(), 1);
+        assert!(s.doc.plain_text(StoryRef::Body).contains("Body text."));
+
+        let mut s = Session::new(wordcraft_doc::Document::new());
+        s.run("references.tableOfAuthorities", &json!({})).unwrap();
+        assert!(after(&s), "table of authorities: {:?}", s.sel.focus);
+
+        let mut s = Session::new(wordcraft_doc::Document::from_text("A plan"));
+        s.run("select.all", &json!({})).unwrap();
+        s.run("references.caption", &json!({"label": "Figure", "text": "A plan"})).unwrap();
+        s.run("caret.docStart", &json!({})).unwrap();
+        s.run("references.tableOfFigures", &json!({})).unwrap();
+        assert!(after(&s), "table of figures: {:?}", s.sel.focus);
+
+        let mut s = Session::new(wordcraft_doc::Document::from_text("Kiln"));
+        s.run("select.all", &json!({})).unwrap();
+        s.run("references.markEntry", &json!({})).unwrap();
+        s.run("caret.docStart", &json!({})).unwrap();
+        s.run("references.index", &json!({})).unwrap();
+        assert!(after(&s), "index: {:?}", s.sel.focus);
     }
 
     /// #2940: a caption with a label of the person's own (Insert Caption › New Label) is a
