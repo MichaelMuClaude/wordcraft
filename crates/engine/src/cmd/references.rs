@@ -505,7 +505,8 @@ fn insert_toc(s: &mut Session, v: &Value) -> CmdResult {
     // not inside the table's own title or entries, where typing (or Enter) would corrupt them.
     if let Some((_, end)) = toc_range(s) {
         let after = end + 1;
-        if s.doc.body.get(after).is_none() {
+        let is_para = s.doc.body.get(after).is_some_and(|b| b.as_para().is_some());
+        if !is_para {
             s.doc.insert_block(StoryRef::Body, &Path::top(after), Block::Para(Paragraph::new()))?;
         }
         s.sel = Selection::caret(Pos { story: StoryRef::Body, path: Path::top(after), off: 0 });
@@ -1269,6 +1270,29 @@ mod tests {
         assert!(s.doc.plain_text(StoryRef::Body).contains("Body text."), "typed body content survives untouched");
         let heading = s.doc.body.iter().filter_map(|b| b.as_para()).find(|p| p.props.style.as_deref() == Some("Heading1"));
         assert_eq!(heading.map(|p| p.plain_text()), Some("Kilns".to_string()));
+    }
+
+    /// A settings-based replacement of a table whose last entry is directly followed by a table
+    /// (nothing paragraph-shaped in between) must still land the caret in a real paragraph: the
+    /// block "after" the table isn't always a paragraph just because it exists.
+    #[test]
+    fn a_toc_replaced_right_before_a_table_still_lands_the_caret_in_a_paragraph() {
+        let mut s = Session::new(wordcraft_doc::Document::new());
+        s.run("references.toc", &json!({"levels": 2})).unwrap();
+        s.run("insert.table", &json!({"rows": 1, "cols": 1})).unwrap();
+        let (_, end) = toc_range(&s).unwrap();
+        while s.doc.body.get(end + 1).is_some_and(|b| b.as_para().is_some_and(|p| p.is_empty())) {
+            s.doc.remove_block(StoryRef::Body, &Path::top(end + 1)).unwrap();
+        }
+        assert!(matches!(&*s.doc.body[end + 1], Block::Table(_)), "test setup: a table must directly follow the table's entries");
+        // Replacing the table's settings must still land the caret in a fresh paragraph right
+        // after the table, not snap back into the table's own entries (a bogus position pointing
+        // at the table gets silently corrected by `clamp_selection` to the nearest *preceding*
+        // paragraph, so a weaker "is this some paragraph" check wouldn't catch the regression).
+        s.run("references.toc", &json!({"levels": 3})).unwrap();
+        let (_, new_end) = toc_range(&s).unwrap();
+        assert_eq!(s.sel.focus.path, Path::top(new_end + 1), "the caret must land right after the table, not snap back into the table");
+        assert!(matches!(&*s.doc.body[new_end + 1], Block::Para(_)));
     }
 
     /// #402: Caption numbering — a custom label above the paragraph, letters, and chapter
