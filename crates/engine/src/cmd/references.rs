@@ -501,6 +501,15 @@ fn insert_toc(s: &mut Session, v: &Value) -> CmdResult {
     s.doc.insert_block(StoryRef::Body, &Path::top(i), Block::Para(head))?;
     let leader = leader(p::str(v, "tabLeader").unwrap_or("dot"));
     regenerate_toc(s, Some(leader), &tabs)?;
+    // Like Word, the caret lands in a paragraph right after the table, ready to keep typing —
+    // not inside the table's own title or entries, where typing (or Enter) would corrupt them.
+    if let Some((_, end)) = toc_range(s) {
+        let after = end + 1;
+        if s.doc.body.get(after).is_none() {
+            s.doc.insert_block(StoryRef::Body, &Path::top(after), Block::Para(Paragraph::new()))?;
+        }
+        s.sel = Selection::caret(Pos { story: StoryRef::Body, path: Path::top(after), off: 0 });
+    }
     s.clamp_selection();
     sel_result(s)
 }
@@ -1235,6 +1244,31 @@ mod tests {
         let first = s.doc.body.iter().filter_map(|b| b.as_para()).find(|p| p.props.style.as_deref() == Some("TOC1")).unwrap();
         let link = first.runs[0].props.link.clone().unwrap();
         assert!(s.doc.bookmarks().iter().any(|(n, _)| format!("#{n}") == link), "{link}");
+    }
+
+    /// Inserting a table of contents (Word itself warns when there's no heading yet, but still
+    /// creates an empty one) must leave the caret in a fresh paragraph just after it, like Word
+    /// does — not inside the table's own title, where typing the rest of the document (and later
+    /// updating the table) would splice stray text into unrelated paragraphs and blank the title.
+    #[test]
+    fn a_toc_inserted_before_any_headings_exist_leaves_the_caret_after_it() {
+        let mut s = Session::new(wordcraft_doc::Document::new());
+        s.run("references.toc", &json!({"levels": 2})).unwrap();
+        assert_eq!(s.sel.focus.path, Path::top(1), "the caret must land right after the table, not inside it");
+        s.run("text.insert", &json!({"text": "\r"})).unwrap();
+        s.run("para.style", &json!({"style": "Heading 1"})).unwrap();
+        s.run("text.insert", &json!({"text": "Kilns\r"})).unwrap();
+        s.run("para.style", &json!({"style": "Normal"})).unwrap();
+        s.run("text.insert", &json!({"text": "Body text."})).unwrap();
+        s.run("references.updateToc", &json!({})).unwrap();
+        assert_eq!(
+            s.doc.plain_text(StoryRef::Body).matches("Contents").count(),
+            1,
+            "the title stays where it was, it doesn't vanish and reappear elsewhere"
+        );
+        assert!(s.doc.plain_text(StoryRef::Body).contains("Body text."), "typed body content survives untouched");
+        let heading = s.doc.body.iter().filter_map(|b| b.as_para()).find(|p| p.props.style.as_deref() == Some("Heading1"));
+        assert_eq!(heading.map(|p| p.plain_text()), Some("Kilns".to_string()));
     }
 
     /// #402: Caption numbering — a custom label above the paragraph, letters, and chapter
