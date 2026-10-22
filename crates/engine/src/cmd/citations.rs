@@ -837,7 +837,8 @@ fn generated_list_with(s: &mut Session, instr: &str, title: &str, leader: Option
     while s.doc.body.get(after).and_then(|b| b.as_para()).is_some_and(|p| p.props.style.as_deref() == Some(ENTRY_STYLE)) {
         after += 1;
     }
-    let is_para = s.doc.body.get(after).is_some_and(|b| b.as_para().is_some());
+    // Another generated list's title right after it is no place to type either.
+    let is_para = s.doc.body.get(after).and_then(|b| b.as_para()).is_some_and(|p| list_kind(p).is_none());
     if !is_para {
         s.doc.insert_block(StoryRef::Body, &Path::top(after), Block::Para(Paragraph::new()))?;
     }
@@ -1641,6 +1642,21 @@ mod tests {
         s.run("text.insert", &json!({"text": "Body text."})).unwrap();
         let entries: Vec<String> = list_entries(&s).into_iter().map(|(t, _)| t).collect();
         assert_eq!(entries, ["Figure 1: Kiln\t1", "Figure 2: Rock\t1", "Table 1: Press\t1"], "typing left the lists alone");
+    }
+
+    /// #3230 review: a list inserted at the start of another generated list's title leaves the
+    /// caret in a new paragraph between them, not in the older list's title.
+    #[test]
+    fn a_generated_list_inserted_before_another_leaves_the_caret_between_them() {
+        let mut s = Session::new(wordcraft_doc::Document::new());
+        s.run("references.tableOfAuthorities", &json!({})).unwrap();
+        s.run("caret.docStart", &json!({})).unwrap();
+        assert!(s.doc.para_at(&s.sel.focus).and_then(list_kind).is_some(), "at the older list's title");
+        s.run("references.bibliography", &json!({})).unwrap();
+        let para = s.doc.para_at(&s.sel.focus).unwrap();
+        assert!(list_kind(para).is_none() && para.props.style.as_deref() != Some(ENTRY_STYLE), "caret in a list: {:?}", s.sel.focus);
+        let next = s.doc.body.get(s.sel.focus.path.last() + 1).and_then(|b| b.as_para());
+        assert!(next.and_then(list_kind).is_some_and(|k| k.starts_with("TOA")), "the older list follows");
     }
 
     /// #3013 review: a table of figures from Word whose saved list sits in the field's result (one
