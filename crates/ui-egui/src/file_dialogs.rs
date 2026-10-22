@@ -529,7 +529,7 @@ mod tests {
         let revision = a.session.rev();
         let result = a.run("file.save", json!({})).unwrap();
         assert_eq!(result["pending"], "saveAs");
-        assert_eq!(shown.borrow()[0].0, FileDialogRequest::Save { name: "novella.docx".into() });
+        assert_eq!(shown.borrow()[0].0, FileDialogRequest::Save { name: "novella.docx".into(), dir: None });
         answer(&shown, None);
         assert_eq!(a.poll_file_dialog().unwrap().unwrap()["saved"], false);
         assert_eq!(a.session.doc, draft);
@@ -613,7 +613,7 @@ mod tests {
         h.get_by_label("Save").click();
         h.run_steps(3);
         assert!(h.state().file_dialog_open(), "the Save button asks for a supported target");
-        assert_eq!(shown.borrow()[0].0, FileDialogRequest::Save { name: "novella.docx".into() });
+        assert_eq!(shown.borrow()[0].0, FileDialogRequest::Save { name: "novella.docx".into(), dir: None });
         answer(&shown, None);
         h.run_steps(3);
 
@@ -624,7 +624,7 @@ mod tests {
         h.event(egui::Event::Key { key: egui::Key::S, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::COMMAND });
         h.run_steps(3);
         assert!(h.state().file_dialog_open(), "the focused editor's Mod+S asks too");
-        assert_eq!(shown.borrow()[0].0, FileDialogRequest::Save { name: "novella.docx".into() });
+        assert_eq!(shown.borrow()[0].0, FileDialogRequest::Save { name: "novella.docx".into(), dir: None });
         answer(&shown, None);
         h.run_steps(3);
         assert!(h.state().session.dirty);
