@@ -136,6 +136,7 @@ Ranked, to beta (detail and remaining milestones in [docs/roadmap.md](docs/roadm
 
 ## Progress log
 
+- 2026-10-22: Tables in older-mode documents stay where Word puts them when cells have their own margins (#3407): the table moves out by its default left cell margin (`w:tblCellMar`), not the first cell's own (`w:tcMar`), so a table with 0 table margins and 0.25 cm cell margins keeps its edge on the page margin and its text inset, matching Word's PDF to the point.
 - 2026-10-21: Bullets and Numbering toggle off style-inherited lists at their effective level, including basedOn chains and numbered ListParagraph styles; other paragraphs and list definitions stay unchanged (related to #3459).
 
 Four geometry-dependent layout controls request Source Sans 3 explicitly. Installed substitute fonts no longer choose their line breaks. Assertions and renderer font fallback policy are unchanged.
