@@ -824,7 +824,11 @@ fn generated_list_with(s: &mut Session, instr: &str, title: &str, leader: Option
         seed.props.tabs = Some(vec![TabStop { pos: 0.0, align: TabAlign::Right, leader }]);
         s.doc.insert_block(StoryRef::Body, &Path::top(i.saturating_add(1)), Block::Para(seed))?;
     }
+    // Rebuilding a list above this one can change its number of entries and so this list's
+    // place: find it again afterwards as the same-numbered list title.
+    let ordinal = s.doc.body.iter().take(i).filter(|b| b.as_para().and_then(list_kind).is_some()).count();
     update_generated(s)?;
+    let i = s.doc.body.iter().enumerate().filter(|(_, b)| b.as_para().and_then(list_kind).is_some()).nth(ordinal).map_or(i, |(k, _)| k);
     // Like Word, the caret lands in a paragraph right after the list, ready to keep typing — not
     // inside its own title or entries, where typing (or Enter) would corrupt them (the same fix
     // as references.toc's insert_toc, for its sibling generated lists: bibliography, table of
@@ -1610,6 +1614,33 @@ mod tests {
         let want = [("Figure 1: Kiln\t1", TabLeader::Dot), ("Figure 2: Rock\t1", TabLeader::Dot), ("Table 1: Press\t1", TabLeader::Hyphen)];
         let want: Vec<(String, Option<TabLeader>)> = want.iter().map(|(t, l)| (t.to_string(), Some(*l))).collect();
         assert_eq!(list_entries(&s), want);
+    }
+
+    /// #3230 review: the caret lands after the new list even when a list above it is out of date
+    /// and gains an entry while every list is rebuilt, moving the new one down.
+    #[test]
+    fn a_generated_list_below_a_stale_one_still_leaves_the_caret_after_it() {
+        let mut s = Session::new(wordcraft_doc::Document::from_text("Kiln\nPress\nRock\n"));
+        for (text, label) in [("Kiln", "Figure"), ("Press", "Table")] {
+            s.run("select.text", &json!({"text": text})).unwrap();
+            s.run("references.caption", &json!({"label": label, "text": text})).unwrap();
+        }
+        s.run("caret.docEnd", &json!({})).unwrap();
+        s.run("references.tableOfFigures", &json!({})).unwrap();
+        s.run("select.text", &json!({"text": "Rock"})).unwrap();
+        s.run("references.caption", &json!({"label": "Figure", "text": "Rock"})).unwrap();
+        assert_eq!(list_entries(&s).len(), 1, "the list of figures is out of date");
+        s.run("caret.docEnd", &json!({})).unwrap();
+        s.run("text.newParagraph", &json!({})).unwrap();
+        s.run("references.tableOfFigures", &json!({"label": "Table"})).unwrap();
+        let here = s.sel.focus.path.last();
+        let para = s.doc.para_at(&s.sel.focus).unwrap();
+        assert!(list_kind(para).is_none() && para.props.style.as_deref() != Some(ENTRY_STYLE), "caret in the list: {here}");
+        let before = s.doc.body.get(here - 1).and_then(|b| b.as_para()).unwrap();
+        assert_eq!(before.plain_text(), "Table 1: Press\t1", "right after the new list's last entry");
+        s.run("text.insert", &json!({"text": "Body text."})).unwrap();
+        let entries: Vec<String> = list_entries(&s).into_iter().map(|(t, _)| t).collect();
+        assert_eq!(entries, ["Figure 1: Kiln\t1", "Figure 2: Rock\t1", "Table 1: Press\t1"], "typing left the lists alone");
     }
 
     /// #3013 review: a table of figures from Word whose saved list sits in the field's result (one
