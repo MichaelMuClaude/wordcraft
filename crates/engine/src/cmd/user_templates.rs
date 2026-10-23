@@ -357,6 +357,7 @@ mod tests {
     /// .dotx and .dotm templates show their names the same way, without the extension; two that
     /// would look alike in one category show their file names.
     #[test]
+    #[cfg(not(target_arch = "wasm32"))]
     fn labels_drop_the_extension_alike_and_tell_twins_apart() {
         let d = scratch("labels");
         template(&d.join("Service contract.dotm"), "a", "");
