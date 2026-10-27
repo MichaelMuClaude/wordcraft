@@ -1267,9 +1267,9 @@ mod tests {
         };
         let p = MathPos::new(vec![(0, 2)], 0);
         let label = |eq: &Arg, display| structure_actions(eq, &p, display).into_iter().find(|a| a.1 == "nary.toggleGrow").map(|a| a.2);
-        let grow_of = |eq: &Arg| match &eq[0] {
-            MNode::Nary { grow, .. } => *grow,
-            _ => unreachable!(),
+        let grow_of = |eq: &Arg| match eq.first() {
+            Some(MNode::Nary { grow, .. }) => *grow,
+            other => panic!("{other:?}"),
         };
         for (display, label_now, after) in [(true, "Don't Grow with Argument", Some(false)), (false, "Grow with Argument", Some(true))] {
             let mut eq = nary(None);
