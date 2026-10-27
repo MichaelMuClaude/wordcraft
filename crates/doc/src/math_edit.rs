@@ -914,7 +914,7 @@ pub fn structure_actions(root: &Arg, pos: &MathPos) -> Vec<(usize, &'static str,
                 );
                 add("nary.toggleLower", if *sub_hide { "Show Lower Limit" } else { "Hide Lower Limit" });
                 add("nary.toggleUpper", if *sup_hide { "Show Upper Limit" } else { "Hide Upper Limit" });
-                add("nary.toggleGrow", if *grow { "Don't Grow with Argument" } else { "Grow with Argument" });
+                add("nary.toggleGrow", if *grow == Some(true) { "Don't Grow with Argument" } else { "Grow with Argument" });
             }
             MNode::Delim { grow, elems, .. } => {
                 add("delim.addSeparator", "Insert Argument After");
@@ -1030,7 +1030,11 @@ pub fn apply_structure(root: &mut Arg, pos: &MathPos, level: usize, action: &str
                 here(1)
             }
         }
-        (MNode::Nary { grow, .. }, "nary.toggleGrow") | (MNode::Delim { grow, .. }, "delim.toggleGrow") => {
+        (MNode::Nary { grow, .. }, "nary.toggleGrow") => {
+            *grow = Some(*grow != Some(true));
+            inner
+        }
+        (MNode::Delim { grow, .. }, "delim.toggleGrow") => {
             *grow = !*grow;
             inner
         }

@@ -224,7 +224,7 @@ fn characters_the_math_font_lacks_fall_back() {
     };
     let x = || vec![MNode::Run(MRun::new("x"))];
     let nodes = [
-        MNode::Nary { chr: c, lim_loc: None, grow: false, sub_hide: true, sup_hide: true, sub: vec![], sup: vec![], e: x() },
+        MNode::Nary { chr: c, lim_loc: None, grow: None, sub_hide: true, sup_hide: true, sub: vec![], sup: vec![], e: x() },
         MNode::Delim { beg: Some(c), end: Some(c), sep: None, grow: true, shp_match: false, elems: vec![x()] },
         MNode::Acc { chr: c, e: x() },
         MNode::GroupChr { chr: c, top: true, e: x() },
@@ -371,7 +371,7 @@ fn hostile_trees_never_panic() {
     let _ = layout_equation(&Math { nodes: n, ..Default::default() }, "", &rc(), true, 400.0, &MathProps::default(), &mut 0);
     // Empty everything.
     let empty = vec![
-        MNode::Nary { chr: '\0', lim_loc: None, grow: true, sub_hide: false, sup_hide: false, sub: vec![], sup: vec![], e: vec![] },
+        MNode::Nary { chr: '\0', lim_loc: None, grow: Some(true), sub_hide: false, sup_hide: false, sub: vec![], sup: vec![], e: vec![] },
         MNode::Delim { beg: Some('\u{10FFFF}'), end: None, sep: None, grow: true, shp_match: false, elems: vec![] },
         MNode::Matrix { rows: vec![vec![]], col_jc: vec![] },
         MNode::EqArr { rows: vec![] },
@@ -430,7 +430,7 @@ fn a_nary_operator_without_a_cataloged_size_variant_still_grows_in_display_mode(
     let n = MNode::Nary {
         chr: '∫',
         lim_loc: None,
-        grow: false,
+        grow: None,
         sub_hide: true,
         sup_hide: true,
         sub: vec![],
@@ -479,7 +479,7 @@ fn a_display_operator_grows_to_match_a_tall_operand_without_an_explicit_grow() {
             path: Vec::new(),
             node_stack: Vec::new(),
         };
-        let n = MNode::Nary { chr: '∫', lim_loc: None, grow: false, sub_hide: true, sup_hide: true, sub: vec![], sup: vec![], e };
+        let n = MNode::Nary { chr: '∫', lim_loc: None, grow: None, sub_hide: true, sup_hide: true, sub: vec![], sup: vec![], e };
         let st = St { level: 0, display: true, cramped: false, upright: false };
         let op = &cx.op_atoms(&n, st, 0)[0];
         op.a + op.d
@@ -490,6 +490,35 @@ fn a_display_operator_grows_to_match_a_tall_operand_without_an_explicit_grow() {
         tall > small * 1.3,
         "operator height with a fraction operand {tall} should clearly exceed its height with a plain letter operand {small}"
     );
+}
+
+/// #3217 review: an explicit `m:grow="0"` keeps a display operator at its own size beside a tall
+/// operand; only a file that doesn't say gets Word's display default.
+#[test]
+fn an_explicit_no_grow_keeps_a_display_operator_small_beside_a_tall_operand() {
+    let (face, table) = wordcraft_fonts::math::resolve_math("Cambria Math");
+    let Some(t) = table else { return }; // no math font installed in this environment
+    let op_height = |grow: Option<bool>| {
+        let mut cx = Ctx {
+            face,
+            t: Some(t.clone()),
+            upem: face.upem.max(1.0) as f32,
+            base: 12.0,
+            color: Rgb::BLACK,
+            text_font: String::new(),
+            nodes: 0,
+            path: Vec::new(),
+            node_stack: Vec::new(),
+        };
+        let e = vec![MNode::Frac { kind: FracKind::Bar, num: vec![MNode::Run(MRun::new("a"))], den: vec![MNode::Run(MRun::new("b"))] }];
+        let n = MNode::Nary { chr: '∫', lim_loc: None, grow, sub_hide: true, sup_hide: true, sub: vec![], sup: vec![], e };
+        let st = St { level: 0, display: true, cramped: false, upright: false };
+        let op = &cx.op_atoms(&n, st, 0)[0];
+        op.a + op.d
+    };
+    let (unsaid, off, on) = (op_height(None), op_height(Some(false)), op_height(Some(true)));
+    assert!(off < unsaid * 0.8, "explicit off {off} stays smaller than the default {unsaid}");
+    assert!((unsaid - on).abs() < 0.01, "a file that doesn't say grows like an explicit on: {unsaid} vs {on}");
 }
 
 /// `scaled_fallback`'s target can be smaller than a glyph's own natural size (e.g. a tiny

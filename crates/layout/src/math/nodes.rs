@@ -231,10 +231,10 @@ impl Ctx {
                     };
                 }
                 // Word grows a display operator to match a taller operand (a stacked fraction, say)
-                // whether or not `m:grow` is explicitly on: observed against real Word on files
-                // this project itself writes with `m:grow` absent (#3208). `grow` still gates it
-                // for an inline (non-display) operator, where this hasn't been verified.
-                let grow = *grow || st.display;
+                // when `m:grow` is absent: observed against real Word on files this project itself
+                // writes without it (#3208). An explicit `m:grow` (on or off) is followed; for an
+                // inline (non-display) operator absent means off, where this hasn't been verified.
+                let grow = grow.unwrap_or(st.display);
                 if grow {
                     target = target.max(e.a + e.d);
                 }
@@ -242,7 +242,7 @@ impl Ctx {
                     // The math font lacks the operator: a fallback font's glyph, display-sized.
                     let s = if st.display { size * 1.4 } else { size };
                     self.char_glyphs(*chr, s, 0)
-                } else if grow && target > 0.0 && self.t.is_some() {
+                } else if grow && target > 0.0 {
                     self.stretch_v(base_gid, target, size).unwrap_or_else(|| self.scaled_fallback(base_gid, target, size))
                 } else if target > 0.0 && self.t.is_some() {
                     // Word sets display operators about 1.2 em tall: the size variant nearest that.
