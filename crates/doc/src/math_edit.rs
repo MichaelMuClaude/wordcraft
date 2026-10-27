@@ -170,6 +170,28 @@ pub fn arg_at<'a>(root: &'a Arg, path: &[(usize, usize)]) -> Option<&'a Arg> {
     Some(a)
 }
 
+/// Whether the argument at `path` is laid out in display style, given whether the equation is:
+/// the numerator and denominator of a stacked or skewed fraction, limits, scripts and a radical's
+/// degree are not, the rest (an operand, a delimiter's elements, a linear fraction…) keep it.
+/// Mirrors what `wordcraft-layout` does with its style at each structure.
+pub fn display_at(root: &Arg, path: &[(usize, usize)], display: bool) -> bool {
+    use crate::math::FracKind;
+    let mut display = display;
+    let mut a = root;
+    for &(n, c) in path {
+        let Some(node) = a.get(n) else { return display };
+        display = display
+            && match (node, c) {
+                (MNode::Frac { kind, .. }, _) => *kind == FracKind::Linear,
+                (MNode::Script { .. }, 1 | 2) | (MNode::Rad { .. }, 0) | (MNode::Nary { .. }, 0 | 1) | (MNode::Lim { .. }, 1) => false,
+                _ => true,
+            };
+        let Some(next) = child(node, c) else { return display };
+        a = next;
+    }
+    display
+}
+
 pub fn arg_at_mut<'a>(root: &'a mut Arg, path: &[(usize, usize)]) -> Option<&'a mut Arg> {
     let mut a = root;
     for (n, c) in path {
@@ -893,6 +915,8 @@ pub fn structure_actions(root: &Arg, pos: &MathPos, display: bool) -> Vec<(usize
         let Some(&(j, _)) = pos.path.get(level) else { continue };
         let Some(node) = pos.path.get(..level).and_then(|p| arg_at(root, p)).and_then(|a| a.get(j)) else { continue };
         let mut add = |a: &'static str, l: &'static str| out.push((level, a, l));
+        // The operator's own style: a nested one is not in display style, whatever the equation is.
+        let display = display_at(root, pos.path.get(..level).unwrap_or_default(), display);
         match node {
             MNode::Frac { kind, .. } => {
                 use crate::math::FracKind::*;
@@ -970,6 +994,7 @@ pub fn apply_structure(root: &mut Arg, pos: &MathPos, level: usize, action: &str
     let pos = clamp(root, pos);
     let &(j, c) = pos.path.get(level)?;
     let parent_path = pos.path.get(..level)?.to_vec();
+    let display = display_at(root, &parent_path, display);
     let inner = MathPos { path: pos.path.clone(), off: pos.off };
     let parent = arg_at_mut(root, &parent_path)?;
     let start = node_start(parent, j);
@@ -1280,6 +1305,48 @@ mod tests {
         // Said outright, the file's word counts, whatever the equation's mode.
         assert_eq!(label(&nary(Some(false)), true), Some("Grow with Argument"));
         assert_eq!(label(&nary(Some(true)), false), Some("Don't Grow with Argument"));
+    }
+
+    /// #3217 review: an operator nested in another's limit, in a fraction's numerator or in a
+    /// radical's degree is not in display style even in a displayed equation, so it doesn't grow
+    /// by default and its action offers to turn growth on; one in an operand or a delimiter is.
+    #[test]
+    fn the_nary_grow_action_uses_the_operators_own_style() {
+        let integral = |grow, e: Arg, sup: Arg| MNode::Nary {
+            chr: '\u{222B}',
+            lim_loc: None,
+            grow,
+            sub_hide: true,
+            sup_hide: sup.is_empty(),
+            sub: vec![],
+            sup,
+            e,
+        };
+        let x = || vec![MNode::Run(MRun::new("x"))];
+        let inner = || integral(None, x(), vec![]);
+        let label = |eq: &Arg, path: Vec<(usize, usize)>| {
+            let p = MathPos::new(path, 0);
+            structure_actions(eq, &p, true).into_iter().find(|a| a.1 == "nary.toggleGrow").map(|a| a.2)
+        };
+        const GROWS: Option<&str> = Some("Don't Grow with Argument");
+        const STAYS: Option<&str> = Some("Grow with Argument");
+        // In the outer operator's operand (child 2), as a delimiter's element, in display style.
+        let in_operand = vec![integral(Some(false), vec![inner()], vec![])];
+        assert_eq!(label(&in_operand, vec![(0, 2), (0, 2)]), GROWS, "operand");
+        let in_delim = vec![MNode::Delim { beg: Some('('), end: Some(')'), sep: None, grow: true, shp_match: false, elems: vec![vec![inner()]] }];
+        assert_eq!(label(&in_delim, vec![(0, 0), (0, 2)]), GROWS, "delimiter");
+        // In the outer operator's upper limit (child 1): script style.
+        let in_limit = vec![integral(None, x(), vec![inner()])];
+        assert_eq!(label(&in_limit, vec![(0, 1), (0, 2)]), STAYS, "limit");
+        let mut eq = in_limit.clone();
+        apply_structure(&mut eq, &MathPos::new(vec![(0, 1), (0, 2)], 0), 1, "nary.toggleGrow", true).unwrap();
+        let MNode::Nary { sup, .. } = &eq[0] else { panic!("{eq:?}") };
+        assert!(matches!(&sup[0], MNode::Nary { grow: Some(true), .. }), "its first click turns growth on: {sup:?}");
+        // In a stacked fraction's numerator, and a radical's degree.
+        let in_frac = vec![MNode::Frac { kind: crate::math::FracKind::Bar, num: vec![inner()], den: x() }];
+        assert_eq!(label(&in_frac, vec![(0, 0), (0, 2)]), STAYS, "numerator");
+        let in_rad = vec![MNode::Rad { deg: vec![inner()], deg_hide: false, e: x() }];
+        assert_eq!(label(&in_rad, vec![(0, 0), (0, 2)]), STAYS, "degree");
     }
 
     #[test]
