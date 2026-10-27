@@ -884,7 +884,9 @@ pub fn number_equation(root: &mut Arg) -> bool {
 
 /// Word's right-click actions for the structures around the caret: (level, action id, label),
 /// innermost first. `level` indexes `pos.path` (the structure is the node at that step).
-pub fn structure_actions(root: &Arg, pos: &MathPos) -> Vec<(usize, &'static str, &'static str)> {
+/// `display` is whether the equation is displayed on a line of its own: an n-ary operator that
+/// doesn't say whether it grows then grows with its argument, which the action reflects.
+pub fn structure_actions(root: &Arg, pos: &MathPos, display: bool) -> Vec<(usize, &'static str, &'static str)> {
     let pos = clamp(root, pos);
     let mut out = Vec::new();
     for level in (0..pos.path.len()).rev() {
@@ -914,7 +916,7 @@ pub fn structure_actions(root: &Arg, pos: &MathPos) -> Vec<(usize, &'static str,
                 );
                 add("nary.toggleLower", if *sub_hide { "Show Lower Limit" } else { "Hide Lower Limit" });
                 add("nary.toggleUpper", if *sup_hide { "Show Upper Limit" } else { "Hide Upper Limit" });
-                add("nary.toggleGrow", if *grow == Some(true) { "Don't Grow with Argument" } else { "Grow with Argument" });
+                add("nary.toggleGrow", if grow.unwrap_or(display) { "Don't Grow with Argument" } else { "Grow with Argument" });
             }
             MNode::Delim { grow, elems, .. } => {
                 add("delim.addSeparator", "Insert Argument After");
@@ -964,7 +966,7 @@ pub fn structure_actions(root: &Arg, pos: &MathPos) -> Vec<(usize, &'static str,
 }
 
 /// Apply a structure action (from [`structure_actions`]) at `level`. Returns the new caret.
-pub fn apply_structure(root: &mut Arg, pos: &MathPos, level: usize, action: &str) -> Option<MathPos> {
+pub fn apply_structure(root: &mut Arg, pos: &MathPos, level: usize, action: &str, display: bool) -> Option<MathPos> {
     let pos = clamp(root, pos);
     let &(j, c) = pos.path.get(level)?;
     let parent_path = pos.path.get(..level)?.to_vec();
@@ -1031,7 +1033,7 @@ pub fn apply_structure(root: &mut Arg, pos: &MathPos, level: usize, action: &str
             }
         }
         (MNode::Nary { grow, .. }, "nary.toggleGrow") => {
-            *grow = Some(*grow != Some(true));
+            *grow = Some(!grow.unwrap_or(display));
             inner
         }
         (MNode::Delim { grow, .. }, "delim.toggleGrow") => {
@@ -1247,21 +1249,54 @@ mod tests {
         assert_eq!(lin(&eq), "E=mc^2#(1)");
     }
 
+    /// #3217 review: an n-ary operator that doesn't say whether it grows grows when displayed and
+    /// not inline, so the action offers the opposite, and its first click changes the operator.
+    #[test]
+    fn the_nary_grow_action_follows_the_display_default() {
+        let nary = |grow| {
+            vec![MNode::Nary {
+                chr: '\u{222B}',
+                lim_loc: None,
+                grow,
+                sub_hide: true,
+                sup_hide: true,
+                sub: vec![],
+                sup: vec![],
+                e: vec![MNode::Run(MRun::new("x"))],
+            }]
+        };
+        let p = MathPos::new(vec![(0, 2)], 0);
+        let label = |eq: &Arg, display| structure_actions(eq, &p, display).into_iter().find(|a| a.1 == "nary.toggleGrow").map(|a| a.2);
+        let grow_of = |eq: &Arg| match &eq[0] {
+            MNode::Nary { grow, .. } => *grow,
+            _ => unreachable!(),
+        };
+        for (display, label_now, after) in [(true, "Don't Grow with Argument", Some(false)), (false, "Grow with Argument", Some(true))] {
+            let mut eq = nary(None);
+            assert_eq!(label(&eq, display), Some(label_now), "display={display}");
+            apply_structure(&mut eq, &p, 0, "nary.toggleGrow", display).unwrap();
+            assert_eq!(grow_of(&eq), after, "display={display}");
+        }
+        // Said outright, the file's word counts, whatever the equation's mode.
+        assert_eq!(label(&nary(Some(false)), true), Some("Grow with Argument"));
+        assert_eq!(label(&nary(Some(true)), false), Some("Don't Grow with Argument"));
+    }
+
     #[test]
     fn structure_actions_work() {
         let mut eq = parse_linear("■(a&b@c&d)");
         let p = MathPos::new(vec![(0, 3)], 0);
-        let acts = structure_actions(&eq, &p);
+        let acts = structure_actions(&eq, &p, false);
         assert!(acts.iter().any(|a| a.1 == "matrix.rowBelow"));
-        let p = apply_structure(&mut eq, &p, 0, "matrix.rowBelow").unwrap();
-        let p = apply_structure(&mut eq, &p, 0, "matrix.colAfter").unwrap();
+        let p = apply_structure(&mut eq, &p, 0, "matrix.rowBelow", false).unwrap();
+        let p = apply_structure(&mut eq, &p, 0, "matrix.colAfter", false).unwrap();
         assert_eq!(lin(&eq), "■(a&b&@c&d&@&&)");
-        let _ = apply_structure(&mut eq, &p, 0, "matrix.deleteRow").unwrap();
+        let _ = apply_structure(&mut eq, &p, 0, "matrix.deleteRow", false).unwrap();
         let mut eq = parse_linear("√x");
-        let p = apply_structure(&mut eq, &MathPos::new(vec![(0, 1)], 1), 0, "rad.toggleDegree").unwrap();
+        let p = apply_structure(&mut eq, &MathPos::new(vec![(0, 1)], 1), 0, "rad.toggleDegree", false).unwrap();
         assert_eq!(p.path, vec![(0, 0)], "caret into the degree");
         let mut eq = parse_linear("a+(b)");
-        apply_structure(&mut eq, &MathPos::new(vec![(1, 0)], 0), 0, "remove").unwrap();
+        apply_structure(&mut eq, &MathPos::new(vec![(1, 0)], 0), 0, "remove", false).unwrap();
         assert_eq!(lin(&eq), "a+b");
         // Every action on every structure, at hostile positions, never panics.
         let all = parse_linear("x=(-b±√(3&b^2-4ac))/2a+∑_(i=1)^n▒i+■(a&b@c&d)+█(x@y)+⏞(a)+¯(b)+x_1^2+(a│b)");
@@ -1269,10 +1304,10 @@ mod tests {
         arg_paths(&all, &mut Vec::new(), &mut paths, 0);
         for path in paths {
             let p = MathPos::new(path, 0);
-            for (level, act, _) in structure_actions(&all, &p) {
+            for (level, act, _) in structure_actions(&all, &p, false) {
                 let mut e = all.clone();
-                let _ = apply_structure(&mut e, &p, level, act);
-                let _ = apply_structure(&mut e, &p, level + 5, act);
+                let _ = apply_structure(&mut e, &p, level, act, false);
+                let _ = apply_structure(&mut e, &p, level + 5, act, false);
             }
         }
     }
